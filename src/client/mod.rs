@@ -8,11 +8,13 @@ use futures_util::{
     SinkExt,
 };
 use log::debug;
+use native_tls::TlsConnector;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
+    connect_async_tls_with_config, tungstenite::protocol::Message, Connector, MaybeTlsStream,
+    WebSocketStream,
 };
 
 use super::command::{create_command, Command, CommandResponse};
@@ -20,9 +22,13 @@ use crate::command::CommandRequest;
 
 use serde::{Deserialize, Serialize};
 
+type WebSocketSplitSink =
+    SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>;
+
 // WebOS TV websocket client allowing to communicate in request-response manner.
 pub struct WebosClient<T> {
     write: Box<Mutex<T>>,
+    input_write: Box<Mutex<WebSocketSplitSink>>,
     next_command_id: Arc<Mutex<u64>>,
     callbacks: Arc<Mutex<HashMap<String, Sender<CommandResponse>>>>,
     pub key: Option<String>,
@@ -63,11 +69,15 @@ impl Clone for WebOsClientConfig {
     }
 }
 
-impl WebosClient<SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>> {
+impl WebosClient<WebSocketSplitSink> {
     /// Creates client connected to device with given address
     pub async fn new(config: WebOsClientConfig) -> Result<Self, ClientError> {
         let url = url::Url::parse(&config.address).map_err(|_| ClientError::MalformedUrl)?;
-        let (ws_stream, _) = connect_async(url)
+        let mut builder = TlsConnector::builder();
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+        let connector = Connector::NativeTls(builder.build().unwrap());
+        let (ws_stream, _) = connect_async_tls_with_config(url, None, false, Some(connector))
             .await
             .map_err(|_| ClientError::ConnectionError)?;
         debug!("WebSocket handshake has been successfully completed");
@@ -89,7 +99,7 @@ where
     where
         S: Stream<Item = Result<Message, Error>> + Send + 'static,
     {
-        let command_id_generator = Arc::from(Mutex::from(0));
+        let command_id_generator = Arc::from(Mutex::from(1));
         let callbacks: Arc<Mutex<HashMap<String, Sender<CommandResponse>>>> =
             Arc::from(Mutex::from(HashMap::new()));
         let callbacks_copy = callbacks.clone();
@@ -108,8 +118,33 @@ where
             .await
             .map_err(|_| ClientError::CommandSendError)?;
         let key = Some(receiver.await.unwrap().payload.unwrap().to_string());
+
+        let (sender, receiver) = oneshot::channel::<CommandResponse>();
+        callbacks.lock().await.insert(1.to_string(), sender);
+        sink.send(Message::from(&create_command(
+            1.to_string(),
+            Command::GetInputWs,
+        )))
+        .await
+        .map_err(|_| ClientError::CommandSendError)?;
+        let input_ws_url = &receiver.await.unwrap().payload.unwrap()["socketPath"];
+        debug!("{:?}", input_ws_url);
+
+        let url = url::Url::parse(input_ws_url.as_str().unwrap())
+            .map_err(|_| ClientError::MalformedUrl)?;
+        let mut builder = TlsConnector::builder();
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+        let connector = Connector::NativeTls(builder.build().unwrap());
+        let (ws_stream, _) = connect_async_tls_with_config(url, None, false, Some(connector))
+            .await
+            .map_err(|_| ClientError::ConnectionError)?;
+        debug!("Input WebSocket handshake has been successfully completed");
+        let (input_sink, _) = ws_stream.split();
+
         Ok(WebosClient {
             write: Box::new(Mutex::new(sink)),
+            input_write: Box::new(Mutex::new(input_sink)),
             next_command_id: command_id_generator,
             callbacks,
             key,
@@ -117,17 +152,38 @@ where
     }
     /// Sends single command and waits for response
     pub async fn send_command(&self, cmd: Command) -> Result<CommandResponse, ClientError> {
-        let (message, promise) = self
-            .prepare_command_to_send(cmd)
-            .await
-            .map_err(|_| ClientError::CommandSendError)?;
-        self.write
-            .lock()
-            .await
-            .send(message)
-            .await
-            .map_err(|_| ClientError::CommandSendError)?;
-        promise.await.map_err(|_| ClientError::CommandSendError)
+        match cmd {
+            Command::Button(_) => {
+                let (message, _) = self
+                    .prepare_command_to_send(cmd)
+                    .await
+                    .map_err(|_| ClientError::CommandSendError)?;
+                self.input_write
+                    .lock()
+                    .await
+                    .send(message)
+                    .await
+                    .map_err(|_| ClientError::CommandSendError)?;
+                debug!("Command sent");
+                Ok(CommandResponse {
+                    id: None,
+                    payload: None,
+                })
+            }
+            _ => {
+                let (message, promise) = self
+                    .prepare_command_to_send(cmd)
+                    .await
+                    .map_err(|_| ClientError::CommandSendError)?;
+                self.write
+                    .lock()
+                    .await
+                    .send(message)
+                    .await
+                    .map_err(|_| ClientError::CommandSendError)?;
+                promise.await.map_err(|_| ClientError::CommandSendError)
+            }
+        }
     }
 
     /// Sends multiple commands and waits for responses
@@ -216,11 +272,17 @@ where
     ) -> Result<(Message, Receiver<CommandResponse>), ()> {
         let id = self.generate_next_id().await;
         let (sender, receiver) = oneshot::channel::<CommandResponse>();
-
         if let Some(mut lock) = self.callbacks.try_lock() {
-            lock.insert(id.clone(), sender);
-            let message = Message::from(&create_command(id, cmd));
-            Ok((message, receiver))
+            if let Command::Button(_) = cmd {
+                lock.insert(id.clone(), sender);
+                let button_cmd = &create_command(id, cmd);
+                let message = Message::from(button_cmd.payload.clone().unwrap().as_str().unwrap());
+                return Ok((message, receiver));
+            } else {
+                lock.insert(id.clone(), sender);
+                let message = Message::from(&create_command(id, cmd));
+                return Ok((message, receiver));
+            }
         } else {
             Err(())
         }

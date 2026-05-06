@@ -7,9 +7,10 @@ pub struct CommandRequest {
     id: String,
     r#type: String, // Required by lg api
     uri: String,
-    payload: Option<Value>,
+    pub payload: Option<Value>,
 }
 
+#[derive(Debug)]
 pub enum Command {
     CreateAlert(Value),
     CloseAlert(String),
@@ -39,6 +40,8 @@ pub enum Command {
     GetServicesList,
     Launch(String, Value),
     GetAudioOutput,
+    GetInputWs,
+    Button(String),
 }
 
 #[derive(Debug)]
@@ -216,6 +219,18 @@ pub fn create_command(id: String, cmd: Command) -> CommandRequest {
             r#type: String::from("request"),
             uri: String::from("ssap://audio/getSoundOutput"),
             payload: None,
+        },
+        Command::GetInputWs => CommandRequest {
+            id,
+            r#type: String::from("request"),
+            uri: String::from("ssap://com.webos.service.networkinput/getPointerInputSocket"),
+            payload: None,
+        },
+        Command::Button(name) => CommandRequest {
+            id,
+            r#type: String::from("request"),
+            uri: String::new(),
+            payload: Some(json!(format!("type:button\nname:{name}\n\n"))),
         },
     }
 }
