@@ -38,6 +38,7 @@ pub enum Command {
     Turn3DOn,
     Turn3DOff,
     GetServicesList,
+    Close(String),
     Launch(String, Value),
     GetAudioOutput,
     GetInputWs,
@@ -213,6 +214,12 @@ pub fn create_command(id: String, cmd: Command) -> CommandRequest {
             r#type: String::from("request"),
             uri: String::from("ssap://system.launcher/launch"),
             payload: Some(json!({ "id": app_id, "params": params })),
+        },
+        Command::Close(app_id) => CommandRequest {
+            id,
+            r#type: String::from("request"),
+            uri: String::from("ssap://system.launcher/close"),
+            payload: Some(json!({ "id": app_id })),
         },
         Command::GetAudioOutput => CommandRequest {
             id,
