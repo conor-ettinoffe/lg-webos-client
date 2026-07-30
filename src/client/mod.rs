@@ -11,6 +11,7 @@ use log::debug;
 use native_tls::TlsConnector;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
+use tokio::time::{self, Duration};
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::protocol::Message, Connector, MaybeTlsStream,
@@ -152,6 +153,7 @@ where
     }
     /// Sends single command and waits for response
     pub async fn send_command(&self, cmd: Command) -> Result<CommandResponse, ClientError> {
+        debug!("Sending command {cmd:?}");
         match cmd {
             Command::Button(_) => {
                 let (message, _) = self
@@ -164,6 +166,7 @@ where
                     .send(message)
                     .await
                     .map_err(|_| ClientError::CommandSendError)?;
+                time::sleep(Duration::from_millis(150)).await;
                 debug!("Command sent");
                 Ok(CommandResponse {
                     id: None,
