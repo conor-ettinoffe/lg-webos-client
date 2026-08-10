@@ -121,9 +121,9 @@ where
         let key = Some(receiver.await.unwrap().payload.unwrap().to_string());
 
         let (sender, receiver) = oneshot::channel::<CommandResponse>();
-        callbacks.lock().await.insert(1.to_string(), sender);
+        callbacks.lock().await.insert(9999.to_string(), sender);
         sink.send(Message::from(&create_command(
-            1.to_string(),
+            9999.to_string(),
             Command::GetInputWs,
         )))
         .await
@@ -275,16 +275,17 @@ where
     ) -> Result<(Message, Receiver<CommandResponse>), ()> {
         let id = self.generate_next_id().await;
         let (sender, receiver) = oneshot::channel::<CommandResponse>();
+        println!("ID: {id}");
         if let Some(mut lock) = self.callbacks.try_lock() {
             if let Command::Button(_) = cmd {
                 lock.insert(id.clone(), sender);
                 let button_cmd = &create_command(id, cmd);
                 let message = Message::from(button_cmd.payload.clone().unwrap().as_str().unwrap());
-                return Ok((message, receiver));
+                Ok((message, receiver))
             } else {
                 lock.insert(id.clone(), sender);
                 let message = Message::from(&create_command(id, cmd));
-                return Ok((message, receiver));
+                Ok((message, receiver))
             }
         } else {
             Err(())
@@ -441,10 +442,32 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio_tungstenite::tungstenite::{Error, Message};
+    use ws_mock::ws_mock_server::{WsMock, WsMockServer};
 
     #[tokio::test]
     async fn create_client() {
-        let device = LgDevice::new(HashMap::new());
+        let server = WsMockServer::start().await;
+        WsMock::new().expect(1).mount(&server).await;
+        let url = &server.uri().await;
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "9999".to_owned(),
+            Message::Text(
+                format!(
+                    r#"
+                {{
+                    "id": "9999",
+                    "payload": {{
+                                    "socketPath": "{url}"
+                               }},
+                    "type":"response"
+                }}"#
+                )
+                .to_owned(),
+            ),
+        );
+        let device = LgDevice::new(responses);
         let (sink, stream) = device.split();
         assert!(
             WebosClient::from_stream_and_sink(stream, sink, WebOsClientConfig::default())
@@ -455,13 +478,17 @@ mod tests {
 
     #[tokio::test]
     async fn send_command() {
+        let server = WsMockServer::start().await;
+        WsMock::new().expect(1).mount(&server).await;
+        let url = &server.uri().await;
+
         let mut responses = HashMap::new();
         responses.insert(
-            "1".to_owned(),
+            "2".to_owned(),
             Message::Text(
                 r#"
                 {
-                    "id": "1",
+                    "id": "2",
                     "payload": {
                                     "returnValue": true
                                 },
@@ -470,7 +497,22 @@ mod tests {
                 .to_owned(),
             ),
         );
-
+        responses.insert(
+            "9999".to_owned(),
+            Message::Text(
+                format!(
+                    r#"
+                {{
+                    "id": "9999",
+                    "payload": {{
+                                    "socketPath": "{url}"
+                               }},
+                    "type":"response"
+                }}"#
+                )
+                .to_owned(),
+            ),
+        );
         let device = LgDevice::new(responses);
         let (sink, stream) = device.split();
         let client = WebosClient::from_stream_and_sink(stream, sink, WebOsClientConfig::default())
