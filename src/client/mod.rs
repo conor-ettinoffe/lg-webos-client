@@ -121,9 +121,9 @@ where
         let key = Some(receiver.await.unwrap().payload.unwrap().to_string());
 
         let (sender, receiver) = oneshot::channel::<CommandResponse>();
-        callbacks.lock().await.insert(9999.to_string(), sender);
+        callbacks.lock().await.insert(1.to_string(), sender);
         sink.send(Message::from(&create_command(
-            9999.to_string(),
+            1.to_string(),
             Command::GetInputWs,
         )))
         .await
@@ -275,7 +275,6 @@ where
     ) -> Result<(Message, Receiver<CommandResponse>), ()> {
         let id = self.generate_next_id().await;
         let (sender, receiver) = oneshot::channel::<CommandResponse>();
-        println!("ID: {id}");
         if let Some(mut lock) = self.callbacks.try_lock() {
             if let Command::Button(_) = cmd {
                 lock.insert(id.clone(), sender);
@@ -447,17 +446,17 @@ mod tests {
     #[tokio::test]
     async fn create_client() {
         let server = WsMockServer::start().await;
-        WsMock::new().expect(1).mount(&server).await;
+        WsMock::new().expect(0).mount(&server).await;
         let url = &server.uri().await;
 
         let mut responses = HashMap::new();
         responses.insert(
-            "9999".to_owned(),
+            "1".to_owned(),
             Message::Text(
                 format!(
                     r#"
                 {{
-                    "id": "9999",
+                    "id": "1",
                     "payload": {{
                                     "socketPath": "{url}"
                                }},
@@ -474,15 +473,32 @@ mod tests {
                 .await
                 .is_ok()
         );
+        server.verify().await;
     }
 
     #[tokio::test]
     async fn send_command() {
         let server = WsMockServer::start().await;
-        WsMock::new().expect(1).mount(&server).await;
+        WsMock::new().expect(0).mount(&server).await;
         let url = &server.uri().await;
 
         let mut responses = HashMap::new();
+        responses.insert(
+            "1".to_owned(),
+            Message::Text(
+                format!(
+                    r#"
+                {{
+                    "id": "1",
+                    "payload": {{
+                                    "socketPath": "{url}"
+                               }},
+                    "type":"response"
+                }}"#
+                )
+                .to_owned(),
+            ),
+        );
         responses.insert(
             "2".to_owned(),
             Message::Text(
@@ -497,13 +513,29 @@ mod tests {
                 .to_owned(),
             ),
         );
+        let device = LgDevice::new(responses);
+        let (sink, stream) = device.split();
+        let client = WebosClient::from_stream_and_sink(stream, sink, WebOsClientConfig::default())
+            .await
+            .unwrap();
+        client.send_command(Command::ChannelUp).await.unwrap();
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn send_button_command() {
+        let server = WsMockServer::start().await;
+        WsMock::new().expect(1).mount(&server).await;
+        let url = &server.uri().await;
+
+        let mut responses = HashMap::new();
         responses.insert(
-            "9999".to_owned(),
+            "1".to_owned(),
             Message::Text(
                 format!(
                     r#"
                 {{
-                    "id": "9999",
+                    "id": "1",
                     "payload": {{
                                     "socketPath": "{url}"
                                }},
@@ -513,11 +545,29 @@ mod tests {
                 .to_owned(),
             ),
         );
+        responses.insert(
+            "2".to_owned(),
+            Message::Text(
+                r#"
+                {
+                    "id": "2",
+                    "payload": {
+                                    "returnValue": true
+                                },
+                    "type":"response"
+                }"#
+                .to_owned(),
+            ),
+        );
         let device = LgDevice::new(responses);
         let (sink, stream) = device.split();
         let client = WebosClient::from_stream_and_sink(stream, sink, WebOsClientConfig::default())
             .await
             .unwrap();
-        client.send_command(Command::ChannelUp).await.unwrap();
+        client
+            .send_command(Command::Button("UP".to_string()))
+            .await
+            .unwrap();
+        server.verify().await;
     }
 }
