@@ -166,7 +166,7 @@ where
                     .send(message)
                     .await
                     .map_err(|_| ClientError::CommandSendError)?;
-                time::sleep(Duration::from_millis(150)).await;
+                time::sleep(Duration::from_millis(250)).await;
                 debug!("Command sent");
                 Ok(CommandResponse {
                     id: None,
